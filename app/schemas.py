@@ -145,6 +145,16 @@ class BayIn(BaseModel):
     image: str = ""
 
 
+class AdminBookingCreate(BaseModel):
+    bay_id: str
+    date: date
+    time: str
+    players: int = 1
+    guest_name: str = ""
+    guest_phone: str = ""
+    payment_status: str = "paid"  # paid | pending | complimentary
+
+
 class DiscountIn(BaseModel):
     code: str
     kind: str = "percent"  # percent | flat

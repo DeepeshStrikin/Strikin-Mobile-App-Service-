@@ -683,6 +683,43 @@ def get_asset(asset_id: str, db: Session = Depends(get_db)):
                  headers={"Cache-Control": "public, max-age=86400"})
 
 
+# ---- Admin: create a booking (counter / complimentary) ----
+@app.post("/admin/bookings/create")
+def admin_create_booking(payload: schemas.AdminBookingCreate, _: bool = Depends(require_admin),
+                         db: Session = Depends(get_db)):
+    bay = db.query(models.Bay).filter(models.Bay.id == payload.bay_id).first()
+    if not bay:
+        raise HTTPException(404, "Bay not found")
+    complimentary = payload.payment_status == "complimentary"
+    gross = 0.0 if complimentary else bay.price_per_session
+    rate = settings.default_gst_rate_percent / 100.0
+    tax_amount = round(gross - gross / (1 + rate), 2) if gross else 0.0
+    loyalty = 0 if complimentary else int(round(gross * settings.loyalty_earn_rate))
+    qr = "STRIKIN-" + "".join(random.choices("ABCDEFGHJKLMNPQRSTUVWXYZ23456789", k=8))
+    pin = f"{random.randint(1000, 9999)}"
+    booking = models.Booking(
+        booking_type="b2c",
+        activity_type_id=bay.activity_type_id,
+        bay_id=bay.id,
+        guest_name=payload.guest_name,
+        guest_phone=payload.guest_phone,
+        slot_date=payload.date,
+        slot_time=payload.time,
+        players=payload.players,
+        total_amount=gross,
+        tax_amount=tax_amount,
+        qr_code=qr,
+        pin=pin,
+        loyalty_earned=loyalty,
+        payment_status="paid" if complimentary else payload.payment_status,
+        status="upcoming",
+    )
+    db.add(booking)
+    db.commit()
+    db.refresh(booking)
+    return {"id": booking.id, "qr_code": qr, "pin": pin, "total_amount": gross}
+
+
 # ---- Reporting (Bookings / Revenue / Dashboard) ----
 @app.get("/admin/bookings")
 def admin_bookings(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
