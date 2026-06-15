@@ -53,7 +53,8 @@ class FoodLine(BaseModel):
 
 class BookingCreate(BaseModel):
     activity_id: str
-    bay_id: str
+    bay_id: str = ""
+    bay_ids: list[str] = Field(default_factory=list)  # multi-bay; falls back to [bay_id]
     date: date
     time: str
     players: int = 1

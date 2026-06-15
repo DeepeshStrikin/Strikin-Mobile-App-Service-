@@ -175,17 +175,21 @@ def list_food(db: Session = Depends(get_db)):
 # ----------------------------- Bookings -----------------------------
 @app.post("/bookings", response_model=schemas.BookingResult)
 def create_booking(payload: schemas.BookingCreate, db: Session = Depends(get_db)):
-    bay = db.query(models.Bay).filter(models.Bay.id == payload.bay_id).first()
-    if not bay:
+    # Resolve the selected bays (multi-bay supported; falls back to a single bay_id).
+    bay_ids = payload.bay_ids or ([payload.bay_id] if payload.bay_id else [])
+    bays = [db.query(models.Bay).filter(models.Bay.id == bid).first() for bid in bay_ids]
+    bays = [b for b in bays if b]
+    if not bays:
         raise HTTPException(404, "Bay not found")
-    if bay.status == "disabled":
-        raise HTTPException(409, "This bay is no longer available — please pick another")
+    if any(b.status == "disabled" for b in bays):
+        raise HTTPException(409, "A selected bay is no longer available — please pick another")
+    bay = bays[0]  # primary bay (for the booking's bay_id and activity)
 
-    # Prevent double-booking the same bay/date/time.
+    # Prevent double-booking any selected bay at that date/time.
     clash = (
         db.query(models.Booking)
         .filter(
-            models.Booking.bay_id == bay.id,
+            models.Booking.bay_id.in_([b.id for b in bays]),
             models.Booking.slot_date == payload.date,
             models.Booking.slot_time == payload.time,
         )
@@ -206,7 +210,8 @@ def create_booking(payload: schemas.BookingCreate, db: Session = Depends(get_db)
             models.BookingFoodOrder(food_item_id=fi.id, quantity=line.quantity, item_total=line_total)
         )
 
-    gross = bay.price_per_session + food_total
+    bay_total = sum(b.price_per_session for b in bays)
+    gross = bay_total + food_total
     rate = settings.default_gst_rate_percent / 100.0
     taxable = round(gross / (1 + rate), 2)
     tax_amount = round(gross - taxable, 2)
@@ -240,16 +245,19 @@ def create_booking(payload: schemas.BookingCreate, db: Session = Depends(get_db)
     db.add(booking)
     db.flush()
 
-    db.add(
-        models.BookingItem(
-            booking_id=booking.id, bay_id=bay.id, item_amount=bay.price_per_session,
-            tax_amount=round(bay.price_per_session - bay.price_per_session / (1 + rate), 2),
-            cgst=round((bay.price_per_session - bay.price_per_session / (1 + rate)) / 2, 2),
-            sgst=round((bay.price_per_session - bay.price_per_session / (1 + rate)) / 2, 2),
-            hsn_sac_code=settings.gst_hsn_sac_code,
-            gst_rate_percent=settings.default_gst_rate_percent,
+    # One line item per selected bay.
+    for b in bays:
+        p = b.price_per_session
+        db.add(
+            models.BookingItem(
+                booking_id=booking.id, bay_id=b.id, item_amount=p,
+                tax_amount=round(p - p / (1 + rate), 2),
+                cgst=round((p - p / (1 + rate)) / 2, 2),
+                sgst=round((p - p / (1 + rate)) / 2, 2),
+                hsn_sac_code=settings.gst_hsn_sac_code,
+                gst_rate_percent=settings.default_gst_rate_percent,
+            )
         )
-    )
     for fo in food_orders:
         fo.booking_id = booking.id
         db.add(fo)
