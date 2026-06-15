@@ -164,6 +164,8 @@ def create_booking(payload: schemas.BookingCreate, db: Session = Depends(get_db)
     bay = db.query(models.Bay).filter(models.Bay.id == payload.bay_id).first()
     if not bay:
         raise HTTPException(404, "Bay not found")
+    if bay.status == "disabled":
+        raise HTTPException(409, "This bay is no longer available — please pick another")
 
     # Prevent double-booking the same bay/date/time.
     clash = (
@@ -861,15 +863,23 @@ def _razorpay_signature_ok(order_id: str, payment_id: str, signature: str) -> bo
 
 
 @app.post("/payments/razorpay/order")
-def create_razorpay_order(payload: schemas.RazorpayOrderCreate):
-    """Creates a Razorpay order. Requires RAZORPAY_KEY_ID/SECRET in backend/.env."""
+def create_razorpay_order(payload: schemas.RazorpayOrderCreate, db: Session = Depends(get_db)):
+    """Creates a Razorpay order. The amount is taken from the booking on the SERVER
+    (not trusted from the client) — so it always matches the current price and can't
+    be tampered with, even if an admin changed the price mid-checkout."""
     if not (settings.razorpay_key_id and settings.razorpay_key_secret):
         raise HTTPException(400, "Razorpay not configured — add keys to backend/.env")
     import base64 as _b64
     import json as _json
     import urllib.request as _u
+    # Prefer the server-side booking total; fall back to the requested amount.
+    amount = payload.amount
+    if payload.booking_id:
+        booking = db.query(models.Booking).filter(models.Booking.id == payload.booking_id).first()
+        if booking:
+            amount = booking.total_amount
     body = _json.dumps({
-        "amount": int(round(payload.amount * 100)),  # paise
+        "amount": int(round(amount * 100)),  # paise
         "currency": "INR",
         "receipt": payload.booking_id or "strikin",
     }).encode()
