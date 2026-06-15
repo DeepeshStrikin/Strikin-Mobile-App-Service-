@@ -57,6 +57,12 @@ def api_root():
     return {"service": settings.app_name, "status": "ok", "docs": "/docs"}
 
 
+@app.get("/")
+def root():
+    return {"service": "Strikin API", "status": "ok",
+            "control_panel": "/admin", "docs": "/docs", "health": "/health"}
+
+
 @app.get("/health")
 def health():
     return {"status": "healthy", "environment": settings.environment}
