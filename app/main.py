@@ -135,6 +135,23 @@ def _setting(db: Session, key: str, default: str) -> str:
     return row.value if (row and row.value) else default
 
 
+def _expire_stale_pending(db: Session, minutes: int = 20) -> None:
+    """Mark unpaid 'pending_payment' bookings older than `minutes` as failed, so they
+    show 'payment failed' and stop holding their slot."""
+    from datetime import datetime as _dt, timedelta as _td
+    cutoff = _dt.utcnow() - _td(minutes=minutes)
+    stale = (db.query(models.Booking)
+             .filter(models.Booking.status == "pending_payment",
+                     models.Booking.created_at < cutoff).all())
+    changed = False
+    for b in stale:
+        b.status = "failed"
+        b.payment_status = "failed"
+        changed = True
+    if changed:
+        db.commit()
+
+
 @app.get("/bays/{bay_id}/slots", response_model=list[schemas.SlotOut])
 def list_slots(bay_id: str, date: str | None = None, db: Session = Depends(get_db)):
     """Time slots generated from the venue's open/close hours (Settings) stepped by
@@ -168,13 +185,15 @@ def list_slots(bay_id: str, date: str | None = None, db: Session = Depends(get_d
         base_times.append(t.strftime("%I:%M %p").lstrip("0"))
         t += _td(minutes=max(interval, 15))
 
+    _expire_stale_pending(db)
     taken = set()
     if date:
         try:
             d = date_type.fromisoformat(date)
             rows = (
                 db.query(models.Booking)
-                .filter(models.Booking.bay_id == bay_id, models.Booking.slot_date == d)
+                .filter(models.Booking.bay_id == bay_id, models.Booking.slot_date == d,
+                        models.Booking.status.notin_(["failed", "cancelled"]))
                 .all()
             )
             taken = {r.slot_time for r in rows}
@@ -216,12 +235,14 @@ def create_booking(payload: schemas.BookingCreate, db: Session = Depends(get_db)
     bay = bays[0]  # primary bay (for the booking's bay_id and activity)
 
     # Prevent double-booking any selected bay at that date/time.
+    _expire_stale_pending(db)
     clash = (
         db.query(models.Booking)
         .filter(
             models.Booking.bay_id.in_([b.id for b in bays]),
             models.Booking.slot_date == payload.date,
             models.Booking.slot_time == payload.time,
+            models.Booking.status.notin_(["failed", "cancelled"]),
         )
         .first()
     )
@@ -796,6 +817,7 @@ def admin_create_booking(payload: schemas.AdminBookingCreate, _: bool = Depends(
 # ---- Reporting (Bookings / Revenue / Dashboard) ----
 @app.get("/admin/bookings")
 def admin_bookings(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    _expire_stale_pending(db)
     rows = db.query(models.Booking).order_by(models.Booking.created_at.desc()).limit(300).all()
     acts = {a.id: a.name for a in db.query(models.ActivityType).all()}
     bays = {b.id: b.name for b in db.query(models.Bay).all()}
