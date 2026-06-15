@@ -183,6 +183,15 @@ class TierIn(BaseModel):
     allow_select: bool = True
 
 
+class TierBayCount(BaseModel):
+    activity_type_id: str
+    key: str
+    count: int
+    price: float = 0
+    max_players: int = 6
+    name_prefix: str = ""
+
+
 class FoodIn(BaseModel):
     name: str
     description: str = ""

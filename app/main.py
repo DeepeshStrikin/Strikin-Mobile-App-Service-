@@ -130,14 +130,44 @@ def list_tiers(activity_id: str, db: Session = Depends(get_db)):
     return {"activity": {"id": act.id, "name": act.name, "slug": act.slug}, "tiers": out}
 
 
+def _setting(db: Session, key: str, default: str) -> str:
+    row = db.query(models.Setting).filter(models.Setting.key == key).first()
+    return row.value if (row and row.value) else default
+
+
 @app.get("/bays/{bay_id}/slots", response_model=list[schemas.SlotOut])
 def list_slots(bay_id: str, date: str | None = None, db: Session = Depends(get_db)):
-    """30-min slots with a 15-min buffer applied. Availability is derived from
-    existing confirmed bookings for that bay/date (demo logic)."""
-    base_times = [
-        "11:00 AM", "11:30 AM", "12:00 PM", "12:30 PM", "1:00 PM",
-        "1:30 PM", "2:00 PM", "2:30 PM", "3:00 PM", "3:30 PM", "4:00 PM",
-    ]
+    """Time slots generated from the venue's open/close hours (Settings) stepped by
+    the bay's tier interval. Past slots are hidden for today; taken slots are marked."""
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+
+    # Venue hours from settings (admin-editable), with sensible defaults.
+    open_s = _setting(db, "open_time", "11:00 AM")
+    close_s = _setting(db, "close_time", "11:00 PM")
+
+    # Slot interval = the bay's tier interval (default 60 min).
+    interval = 60
+    bay = db.query(models.Bay).filter(models.Bay.id == bay_id).first()
+    if bay:
+        tier = (db.query(models.Tier)
+                .filter(models.Tier.activity_type_id == bay.activity_type_id,
+                        models.Tier.key == bay.bay_tier).first())
+        if tier and tier.time_interval_minutes:
+            interval = tier.time_interval_minutes
+
+    try:
+        start = _dt.strptime(open_s, "%I:%M %p")
+        end = _dt.strptime(close_s, "%I:%M %p")
+    except ValueError:
+        start = _dt.strptime("11:00 AM", "%I:%M %p")
+        end = _dt.strptime("11:00 PM", "%I:%M %p")
+
+    base_times = []
+    t = start
+    while t < end:
+        base_times.append(t.strftime("%I:%M %p").lstrip("0"))
+        t += _td(minutes=max(interval, 15))
+
     taken = set()
     if date:
         try:
@@ -607,6 +637,41 @@ def admin_upsert_tier(payload: schemas.TierIn, _: bool = Depends(require_admin),
     return {"ok": True, "key": payload.key}
 
 
+@app.post("/admin/tiers/bay-count")
+def admin_set_bay_count(payload: schemas.TierBayCount, _: bool = Depends(require_admin),
+                        db: Session = Depends(get_db)):
+    """Make a tier have exactly `count` bays — auto-creating named bays or removing
+    extras (only bays with no bookings can be removed)."""
+    existing = (db.query(models.Bay)
+                .filter(models.Bay.activity_type_id == payload.activity_type_id,
+                        models.Bay.bay_tier == payload.key).all())
+    target = max(0, payload.count)
+    prefix = payload.name_prefix or f"{payload.key.upper()} Bay"
+    # price/capacity: prefer the tier/existing values
+    price = payload.price or (existing[0].price_per_session if existing else 0)
+    max_players = payload.max_players or (existing[0].max_players if existing else 6)
+
+    if target > len(existing):
+        for i in range(len(existing), target):
+            db.add(models.Bay(activity_type_id=payload.activity_type_id, name=f"{prefix} {i + 1}",
+                              bay_tier=payload.key, price_per_session=price, max_players=max_players,
+                              description="", image=existing[0].image if existing else ""))
+    elif target < len(existing):
+        removable = [b for b in existing
+                     if not db.query(models.Booking).filter(models.Booking.bay_id == b.id).first()]
+        to_remove = len(existing) - target
+        for b in reversed(removable):
+            if to_remove <= 0:
+                break
+            db.delete(b)
+            to_remove -= 1
+    db.commit()
+    n = (db.query(models.Bay)
+         .filter(models.Bay.activity_type_id == payload.activity_type_id,
+                 models.Bay.bay_tier == payload.key).count())
+    return {"count": n}
+
+
 @app.delete("/admin/tiers")
 def admin_delete_tier(activity_type_id: str, key: str, _: bool = Depends(require_admin),
                       db: Session = Depends(get_db)):
@@ -879,6 +944,8 @@ _DEFAULT_SETTINGS = {
     "gst_hsn_sac_code": settings.gst_hsn_sac_code,
     "venue_name": "Strikin",
     "support_email": settings.sendgrid_from_email or "",
+    "open_time": "11:00 AM",
+    "close_time": "11:00 PM",
 }
 
 
