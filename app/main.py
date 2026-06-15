@@ -150,7 +150,21 @@ def list_slots(bay_id: str, date: str | None = None, db: Session = Depends(get_d
             taken = {r.slot_time for r in rows}
         except ValueError:
             pass
-    return [schemas.SlotOut(time=t, is_available=t not in taken) for t in base_times]
+
+    # For TODAY (IST), hide slots whose time has already passed.
+    from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+    ist = _tz(_td(hours=5, minutes=30))
+    now_ist = _dt.now(ist)
+    is_today = date == now_ist.date().isoformat() if date else False
+
+    out = []
+    for t in base_times:
+        if is_today:
+            slot_t = _dt.strptime(t, "%I:%M %p").time()
+            if (slot_t.hour, slot_t.minute) <= (now_ist.hour, now_ist.minute):
+                continue  # past slot — skip
+        out.append(schemas.SlotOut(time=t, is_available=t not in taken))
+    return out
 
 
 @app.get("/food", response_model=list[schemas.FoodOut])
