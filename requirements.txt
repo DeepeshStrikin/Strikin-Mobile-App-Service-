@@ -1,0 +1,13 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.36
+pydantic==2.10.4
+pydantic-settings==2.7.1
+python-dotenv==1.0.1
+# Multipart form parsing — needed for admin image uploads
+python-multipart==0.0.20
+# TLS: verify certs using the OS trust store (works behind corporate SSL inspection)
+truststore==0.10.4
+certifi==2024.12.14
+# Postgres driver (optional — SQLite works out of the box for local dev)
+psycopg[binary]==3.2.3
