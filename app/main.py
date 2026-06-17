@@ -1173,9 +1173,15 @@ def create_razorpay_order(payload: schemas.RazorpayOrderCreate, db: Session = De
         raise HTTPException(502, f"Razorpay error: {e}")
 
 
+# Completed payments, keyed by Razorpay order_id. The mobile app pays in the
+# device browser, then polls /payments/status to learn the result and come back.
+_PAYMENT_RESULTS: dict = {}
+
+
 @app.get("/payments/checkout")
 def razorpay_checkout_page(order_id: str, amount: int, name: str = "", email: str = "",
-                           contact: str = "", description: str = "Strikin booking"):
+                           contact: str = "", description: str = "Strikin booking",
+                           booking_id: str = ""):
     """A minimal HTML page that runs Razorpay Checkout and reports the result back to
     the app's WebView via a `StrikinPay` JavaScript channel. Used for in-app payment
     on mobile (web uses checkout.js directly)."""
@@ -1202,7 +1208,7 @@ var opts = {{
   "theme": {{"color":"#D6FD31"}},
   "handler": function(r){{
     send({{"payment_id":r.razorpay_payment_id,"order_id":r.razorpay_order_id,"signature":r.razorpay_signature}});
-    go('/payments/done?payment_id='+encodeURIComponent(r.razorpay_payment_id)+'&order_id='+encodeURIComponent(r.razorpay_order_id)+'&signature='+encodeURIComponent(r.razorpay_signature));
+    go('/payments/done?payment_id='+encodeURIComponent(r.razorpay_payment_id)+'&order_id='+encodeURIComponent(r.razorpay_order_id)+'&signature='+encodeURIComponent(r.razorpay_signature)+'&booking_id='+encodeURIComponent("{_html.escape(booking_id)}"));
   }},
   "modal": {{"ondismiss": function(){{ send({{"dismissed":true}}); go('/payments/cancel'); }}}}
 }};
@@ -1212,11 +1218,34 @@ try {{ var rzp = new Razorpay(opts); rzp.open(); }} catch(e){{ send({{"error":St
 
 
 @app.get("/payments/done")
-def payments_done():
+def payments_done(payment_id: str = "", order_id: str = "", signature: str = "",
+                  booking_id: str = "", db: Session = Depends(get_db)):
     from fastapi.responses import HTMLResponse
-    return HTMLResponse("<html><body style='background:#191919;color:#D6FD31;font-family:sans-serif;"
-                        "display:flex;align-items:center;justify-content:center;height:100vh'>"
-                        "<h2>Payment complete — returning…</h2></body></html>")
+    # Remember the result so the mobile app (polling) can pick it up and return.
+    if order_id and payment_id:
+        _PAYMENT_RESULTS[order_id] = {"payment_id": payment_id, "order_id": order_id, "signature": signature}
+        # Confirm the booking right away when the signature checks out (belt-and-suspenders;
+        # the app also verifies after polling).
+        if booking_id and _razorpay_signature_ok(order_id, payment_id, signature):
+            b = db.query(models.Booking).filter(models.Booking.id == booking_id).first()
+            if b:
+                b.payment_status = "paid"
+                b.status = "upcoming"
+                db.commit()
+    return HTMLResponse(
+        "<html><body style='background:#191919;color:#D6FD31;font-family:sans-serif;text-align:center;"
+        "display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0'>"
+        "<h2>Payment complete ✓</h2>"
+        "<p style='color:#E5E8EA'>You can return to the Strikin app now.</p></body></html>")
+
+
+@app.get("/payments/status")
+def payments_status(order_id: str):
+    """The mobile app polls this after launching checkout in the browser."""
+    r = _PAYMENT_RESULTS.get(order_id)
+    if r:
+        return {"paid": True, **r}
+    return {"paid": False}
 
 
 @app.get("/payments/cancel")
