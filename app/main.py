@@ -349,6 +349,17 @@ def get_booking(booking_id: str, db: Session = Depends(get_db)):
     )
 
 
+@app.post("/bookings/{booking_id}/cancel")
+def cancel_booking(booking_id: str, db: Session = Depends(get_db)):
+    """Cancel a booking — frees its slot (cancelled bookings don't block slots)."""
+    b = db.query(models.Booking).filter(models.Booking.id == booking_id).first()
+    if not b:
+        raise HTTPException(404, "Booking not found")
+    b.status = "cancelled"
+    db.commit()
+    return {"cancelled": booking_id, "status": "cancelled"}
+
+
 # ----------------------------- Invites -----------------------------
 @app.post("/bookings/{booking_id}/invite", response_model=schemas.InviteOut)
 def create_invite(booking_id: str, db: Session = Depends(get_db)):
