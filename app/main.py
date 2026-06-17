@@ -836,6 +836,54 @@ def admin_bookings(_: bool = Depends(require_admin), db: Session = Depends(get_d
     } for b in rows]
 
 
+@app.get("/admin/availability")
+def admin_availability(activity_id: str, date: str, _: bool = Depends(require_admin),
+                       db: Session = Depends(get_db)):
+    """For a given activity + date: each bay and which time slots are free vs booked."""
+    _expire_stale_pending(db)
+    from datetime import datetime as _dt, timedelta as _td
+    act = (db.query(models.ActivityType)
+           .filter((models.ActivityType.id == activity_id) | (models.ActivityType.slug == activity_id)).first())
+    if not act:
+        raise HTTPException(404, "Activity not found")
+    bays = (db.query(models.Bay)
+            .filter(models.Bay.activity_type_id == act.id, models.Bay.status != "disabled").all())
+    open_s = _setting(db, "open_time", "11:00 AM")
+    close_s = _setting(db, "close_time", "11:00 PM")
+    try:
+        start = _dt.strptime(open_s, "%I:%M %p"); end = _dt.strptime(close_s, "%I:%M %p")
+    except ValueError:
+        start = _dt.strptime("11:00 AM", "%I:%M %p"); end = _dt.strptime("11:00 PM", "%I:%M %p")
+    tiers = {t.key: t.time_interval_minutes for t in
+             db.query(models.Tier).filter(models.Tier.activity_type_id == act.id).all()}
+
+    booked: dict[str, set] = {}
+    try:
+        d = date_type.fromisoformat(date)
+        for b in (db.query(models.Booking)
+                  .filter(models.Booking.slot_date == d,
+                          models.Booking.status.notin_(["failed", "cancelled"])).all()):
+            booked.setdefault(b.bay_id, set()).add(b.slot_time)
+    except ValueError:
+        pass
+
+    out = []
+    for bay in bays:
+        interval = tiers.get(bay.bay_tier, 60) or 60
+        times = []
+        t = start
+        while t < end:
+            times.append(t.strftime("%I:%M %p").lstrip("0"))
+            t += _td(minutes=max(interval, 15))
+        taken = booked.get(bay.id, set())
+        slots = [{"time": tm, "booked": tm in taken} for tm in times]
+        out.append({"bay": bay.name, "tier": bay.bay_tier,
+                    "free": sum(1 for s in slots if not s["booked"]),
+                    "booked": sum(1 for s in slots if s["booked"]),
+                    "slots": slots})
+    return {"activity": act.name, "date": date, "bays": out}
+
+
 @app.get("/admin/revenue")
 def admin_revenue(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
     _expire_stale_pending(db)
