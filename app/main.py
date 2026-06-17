@@ -873,6 +873,35 @@ def admin_bookings(_: bool = Depends(require_admin), db: Session = Depends(get_d
     } for b in rows]
 
 
+def _purge_booking(db: Session, booking_id: str):
+    """Remove a booking and all rows that reference it (avoids FK errors)."""
+    db.query(models.BookingFoodOrder).filter(models.BookingFoodOrder.booking_id == booking_id).delete()
+    db.query(models.GuestFoodOrder).filter(models.GuestFoodOrder.booking_id == booking_id).delete()
+    db.query(models.BookingItem).filter(models.BookingItem.booking_id == booking_id).delete()
+    db.query(models.Invite).filter(models.Invite.booking_id == booking_id).delete()
+    db.query(models.Booking).filter(models.Booking.id == booking_id).delete()
+
+
+@app.delete("/admin/bookings/clear-failed")
+def admin_clear_failed_bookings(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    """Bulk-delete all failed/cancelled bookings — handy for clearing test data."""
+    ids = [b.id for b in db.query(models.Booking)
+           .filter(models.Booking.payment_status.in_(["failed", "cancelled"])).all()]
+    for bid in ids:
+        _purge_booking(db, bid)
+    db.commit()
+    return {"deleted": len(ids)}
+
+
+@app.delete("/admin/bookings/{booking_id}")
+def admin_delete_booking(booking_id: str, _: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    if not db.query(models.Booking).filter(models.Booking.id == booking_id).first():
+        raise HTTPException(404, "Booking not found")
+    _purge_booking(db, booking_id)
+    db.commit()
+    return {"deleted": booking_id}
+
+
 @app.get("/admin/availability")
 def admin_availability(activity_id: str, date: str, _: bool = Depends(require_admin),
                        db: Session = Depends(get_db)):
