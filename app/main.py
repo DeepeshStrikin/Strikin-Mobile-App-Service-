@@ -838,32 +838,41 @@ def admin_bookings(_: bool = Depends(require_admin), db: Session = Depends(get_d
 
 @app.get("/admin/revenue")
 def admin_revenue(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    _expire_stale_pending(db)
     acts = {a.id: a.name for a in db.query(models.ActivityType).all()}
-    totals: dict[str, float] = {}
-    paid = 0.0
+    totals: dict[str, float] = {}  # PAID revenue per activity
+    collected = 0.0
+    pending_amt = 0.0
     for b in db.query(models.Booking).all():
         name = acts.get(b.activity_type_id, "Other")
-        totals[name] = totals.get(name, 0.0) + (b.total_amount or 0)
+        amt = b.total_amount or 0
         if b.payment_status == "paid":
-            paid += b.total_amount or 0
+            totals[name] = totals.get(name, 0.0) + amt
+            collected += amt
+        elif b.payment_status in ("pending", "pending_payment"):
+            pending_amt += amt
+        # failed bookings are not counted at all
     by_activity = [{"activity": k, "revenue": round(v, 2)} for k, v in sorted(totals.items(), key=lambda x: -x[1])]
     invoices = [{
         "invoice_id": "IN" + b.id[-6:], "customer": b.guest_name or "Guest", "booking_id": b.id,
         "date": str(b.slot_date), "total": b.total_amount, "status": b.payment_status,
     } for b in db.query(models.Booking).order_by(models.Booking.created_at.desc()).limit(100).all()]
-    return {"by_activity": by_activity, "total": round(sum(totals.values()), 2),
-            "paid": round(paid, 2), "invoices": invoices}
+    return {"by_activity": by_activity, "total": round(collected, 2),
+            "pending": round(pending_amt, 2), "invoices": invoices}
 
 
 @app.get("/admin/stats")
 def admin_stats(_: bool = Depends(require_admin), db: Session = Depends(get_db)):
+    _expire_stale_pending(db)
     bookings = db.query(models.Booking).all()
-    total_rev = sum(b.total_amount or 0 for b in bookings)
+    # Revenue = only PAID bookings (failed/pending are not money in hand).
+    total_rev = sum(b.total_amount or 0 for b in bookings if b.payment_status == "paid")
     paid = sum(1 for b in bookings if b.payment_status == "paid")
+    pending = sum(1 for b in bookings if b.payment_status in ("pending", "pending_payment"))
     return {
         "total_bookings": len(bookings),
         "paid_bookings": paid,
-        "pending_bookings": len(bookings) - paid,
+        "pending_bookings": pending,
         "total_revenue": round(total_rev, 2),
         "activities": db.query(models.ActivityType).count(),
         "bays": db.query(models.Bay).count(),
