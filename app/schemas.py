@@ -24,6 +24,7 @@ class BayOut(BaseModel):
     max_players: int
     description: str
     image: str = ""
+    allow_select: bool = True
 
     class Config:
         from_attributes = True

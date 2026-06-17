@@ -84,11 +84,17 @@ def list_bays(activity_id: str, db: Session = Depends(get_db)):
     )
     if not act:
         raise HTTPException(404, "Activity not found")
-    return (
+    bays = (
         db.query(models.Bay)
         .filter(models.Bay.activity_type_id == act.id, models.Bay.status != "disabled")
         .all()
     )
+    # Surface each tier's allow_select onto its bays (default True = pick specific bay).
+    amap = {t.key: t.allow_select for t in
+            db.query(models.Tier).filter(models.Tier.activity_type_id == act.id).all()}
+    for b in bays:
+        b.allow_select = amap.get(b.bay_tier, True)
+    return bays
 
 
 @app.get("/activities/{activity_id}/tiers")
