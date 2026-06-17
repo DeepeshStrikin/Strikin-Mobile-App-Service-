@@ -349,6 +349,32 @@ def get_booking(booking_id: str, db: Session = Depends(get_db)):
     )
 
 
+@app.get("/bookings/{booking_id}/details")
+def booking_details(booking_id: str, db: Session = Depends(get_db)):
+    """Full booking view for the app's Booking Summary — host food + guest food."""
+    b = db.query(models.Booking).filter(models.Booking.id == booking_id).first()
+    if not b:
+        raise HTTPException(404, "Booking not found")
+    act = db.query(models.ActivityType).filter(models.ActivityType.id == b.activity_type_id).first()
+    bay = db.query(models.Bay).filter(models.Bay.id == b.bay_id).first()
+    host_food = []
+    for fo in db.query(models.BookingFoodOrder).filter(models.BookingFoodOrder.booking_id == b.id).all():
+        fi = db.query(models.FoodItem).filter(models.FoodItem.id == fo.food_item_id).first()
+        host_food.append({"name": fi.name if fi else "item", "quantity": fo.quantity, "total": fo.item_total})
+    guest_food = []
+    for g in db.query(models.GuestFoodOrder).filter(models.GuestFoodOrder.booking_id == b.id).all():
+        fi = db.query(models.FoodItem).filter(models.FoodItem.id == g.food_item_id).first()
+        guest_food.append({"guest": g.guest_name, "name": fi.name if fi else "item",
+                           "quantity": g.quantity, "total": g.item_total})
+    return {
+        "id": b.id, "activity": act.name if act else "", "bay": bay.name if bay else "",
+        "date": str(b.slot_date), "time": b.slot_time, "players": b.players,
+        "status": b.status, "payment_status": b.payment_status,
+        "amount": b.total_amount, "qr": b.qr_code, "pin": b.pin,
+        "host_food": host_food, "guest_food": guest_food,
+    }
+
+
 @app.post("/bookings/{booking_id}/cancel")
 def cancel_booking(booking_id: str, db: Session = Depends(get_db)):
     """Cancel a booking — frees its slot (cancelled bookings don't block slots)."""
