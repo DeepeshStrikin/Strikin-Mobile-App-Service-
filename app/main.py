@@ -1076,6 +1076,7 @@ def razorpay_checkout_page(order_id: str, amount: int, name: str = "", email: st
 display:flex;align-items:center;justify-content:center}}</style></head>
 <body><div>Opening secure payment…</div><script>
 function send(msg){{ if(window.StrikinPay&&window.StrikinPay.postMessage){{window.StrikinPay.postMessage(JSON.stringify(msg));}} }}
+function go(path){{ window.location.href = path; }}
 var opts = {{
   "key": "{_html.escape(key)}",
   "order_id": "{_html.escape(order_id)}",
@@ -1085,12 +1086,31 @@ var opts = {{
   "description": "{_html.escape(description)}",
   "prefill": {{"name":"{_html.escape(name)}","email":"{_html.escape(email)}","contact":"{_html.escape(contact)}"}},
   "theme": {{"color":"#D6FD31"}},
-  "handler": function(r){{ send({{"payment_id":r.razorpay_payment_id,"order_id":r.razorpay_order_id,"signature":r.razorpay_signature}}); }},
-  "modal": {{"ondismiss": function(){{ send({{"dismissed":true}}); }}}}
+  "handler": function(r){{
+    send({{"payment_id":r.razorpay_payment_id,"order_id":r.razorpay_order_id,"signature":r.razorpay_signature}});
+    go('/payments/done?payment_id='+encodeURIComponent(r.razorpay_payment_id)+'&order_id='+encodeURIComponent(r.razorpay_order_id)+'&signature='+encodeURIComponent(r.razorpay_signature));
+  }},
+  "modal": {{"ondismiss": function(){{ send({{"dismissed":true}}); go('/payments/cancel'); }}}}
 }};
-try {{ var rzp = new Razorpay(opts); rzp.open(); }} catch(e){{ send({{"error":String(e)}}); }}
+try {{ var rzp = new Razorpay(opts); rzp.open(); }} catch(e){{ send({{"error":String(e)}}); go('/payments/cancel'); }}
 </script></body></html>"""
     return HTMLResponse(content=page)
+
+
+@app.get("/payments/done")
+def payments_done():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse("<html><body style='background:#191919;color:#D6FD31;font-family:sans-serif;"
+                        "display:flex;align-items:center;justify-content:center;height:100vh'>"
+                        "<h2>Payment complete — returning…</h2></body></html>")
+
+
+@app.get("/payments/cancel")
+def payments_cancel():
+    from fastapi.responses import HTMLResponse
+    return HTMLResponse("<html><body style='background:#191919;color:#E5E8EA;font-family:sans-serif;"
+                        "display:flex;align-items:center;justify-content:center;height:100vh'>"
+                        "<h2>Payment cancelled</h2></body></html>")
 
 
 @app.post("/payments/razorpay/verify")
