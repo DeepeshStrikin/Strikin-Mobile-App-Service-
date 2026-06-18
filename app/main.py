@@ -983,8 +983,13 @@ def admin_stats(_: bool = Depends(require_admin), db: Session = Depends(get_db))
     total_rev = sum(b.total_amount or 0 for b in bookings if b.payment_status == "paid")
     paid = sum(1 for b in bookings if b.payment_status == "paid")
     pending = sum(1 for b in bookings if b.payment_status in ("pending", "pending_payment"))
+    failed = sum(1 for b in bookings
+                 if b.payment_status == "failed" or b.status in ("failed", "cancelled"))
+    successful = len(bookings) - failed  # real bookings (paid + pending), excludes failed/cancelled
     return {
-        "total_bookings": len(bookings),
+        # "Total bookings" counts only successful bookings (failed/cancelled excluded).
+        "total_bookings": successful,
+        "failed_bookings": failed,
         "paid_bookings": paid,
         "pending_bookings": pending,
         "total_revenue": round(total_rev, 2),
