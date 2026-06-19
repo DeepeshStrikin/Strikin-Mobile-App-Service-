@@ -58,7 +58,15 @@ def api_root():
 
 
 @app.get("/")
-def root():
+def root(invite: str | None = None):
+    # If an invite token is present, redirect to the customer web app so guests
+    # land on the booking page instead of seeing raw API JSON.
+    if invite:
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(
+            url=f"https://strikinwebapp.netlify.app/?invite={invite}",
+            status_code=302,
+        )
     return {"service": "Strikin API", "status": "ok",
             "control_panel": "/admin", "docs": "/docs", "health": "/health"}
 
@@ -206,18 +214,27 @@ def list_slots(bay_id: str, date: str | None = None, db: Session = Depends(get_d
         except ValueError:
             pass
 
-    # For TODAY (IST), hide slots whose time has already passed.
+    # For TODAY (IST), hide slots whose time has already passed (plus a 30-min
+    # buffer so customers can't book a slot starting in the next few minutes).
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     ist = _tz(_td(hours=5, minutes=30))
     now_ist = _dt.now(ist)
     is_today = date == now_ist.date().isoformat() if date else False
+    # Cutoff = now + 30 min buffer
+    cutoff = now_ist + _td(minutes=30)
+    cutoff_h, cutoff_m = cutoff.hour, cutoff.minute
 
     out = []
     for t in base_times:
         if is_today:
-            slot_t = _dt.strptime(t, "%I:%M %p").time()
-            if (slot_t.hour, slot_t.minute) <= (now_ist.hour, now_ist.minute):
-                continue  # past slot — skip
+            # lstrip("0") can produce "7:00 PM" — pad back for safe parsing
+            t_padded = t if len(t.split(":")[0]) == 2 else "0" + t
+            try:
+                slot_t = _dt.strptime(t_padded, "%I:%M %p").time()
+            except ValueError:
+                slot_t = _dt.strptime(t, "%I:%M %p").time()
+            if (slot_t.hour, slot_t.minute) <= (cutoff_h, cutoff_m):
+                continue  # past or within 30-min buffer — skip
         out.append(schemas.SlotOut(time=t, is_available=t not in taken))
     return out
 
