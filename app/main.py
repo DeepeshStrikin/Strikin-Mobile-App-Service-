@@ -58,15 +58,7 @@ def api_root():
 
 
 @app.get("/")
-def root(invite: str | None = None):
-    # If an invite token is present, redirect to the customer web app so guests
-    # land on the booking page instead of seeing the raw API JSON.
-    if invite:
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(
-            url=f"https://strikinwebapp.netlify.app/?invite={invite}",
-            status_code=302,
-        )
+def root():
     return {"service": "Strikin API", "status": "ok",
             "control_panel": "/admin", "docs": "/docs", "health": "/health"}
 
