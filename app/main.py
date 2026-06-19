@@ -214,14 +214,14 @@ def list_slots(bay_id: str, date: str | None = None, db: Session = Depends(get_d
         except ValueError:
             pass
 
-    # For TODAY (IST), hide slots whose time has already passed (plus a 30-min
+    # For TODAY (IST), hide slots whose time has already passed (plus a 15-min
     # buffer so customers can't book a slot starting in the next few minutes).
     from datetime import datetime as _dt, timedelta as _td, timezone as _tz
     ist = _tz(_td(hours=5, minutes=30))
     now_ist = _dt.now(ist)
     is_today = date == now_ist.date().isoformat() if date else False
-    # Cutoff = now + 30 min buffer
-    cutoff = now_ist + _td(minutes=30)
+    # Cutoff = now + 15 min buffer
+    cutoff = now_ist + _td(minutes=15)
     cutoff_h, cutoff_m = cutoff.hour, cutoff.minute
 
     out = []
@@ -234,7 +234,7 @@ def list_slots(bay_id: str, date: str | None = None, db: Session = Depends(get_d
             except ValueError:
                 slot_t = _dt.strptime(t, "%I:%M %p").time()
             if (slot_t.hour, slot_t.minute) <= (cutoff_h, cutoff_m):
-                continue  # past or within 30-min buffer — skip
+                continue  # past or within 15-min buffer — skip
         out.append(schemas.SlotOut(time=t, is_available=t not in taken))
     return out
 
