@@ -27,9 +27,25 @@ from .seed import seed
 settings = get_settings()
 
 
+def _ensure_columns():
+    """Lightweight migration: add columns introduced after the table was first created.
+    `create_all` only creates missing *tables*, never missing *columns*, so an existing
+    production DB needs the new `razorpay_order_id` column added explicitly."""
+    from sqlalchemy import inspect, text
+    insp = inspect(engine)
+    try:
+        cols = {c["name"] for c in insp.get_columns("bookings")}
+    except Exception:
+        return  # table not created yet — create_all will include the column
+    if "razorpay_order_id" not in cols:
+        with engine.begin() as conn:
+            conn.execute(text("ALTER TABLE bookings ADD COLUMN razorpay_order_id VARCHAR DEFAULT ''"))
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    _ensure_columns()
     db = SessionLocal()
     try:
         seed(db)
@@ -258,6 +274,12 @@ def create_booking(payload: schemas.BookingCreate, db: Session = Depends(get_db)
     bay = bays[0]  # primary bay (for the booking's bay_id and activity)
 
     # Prevent double-booking any selected bay at that date/time.
+    # Lock the bay rows for the duration of this transaction so two concurrent
+    # bookings for the same bay/slot can't both pass the clash check below. The
+    # second request blocks here until the first commits, then sees the clash.
+    # (No-op on SQLite, which serialises writes anyway — fine for local dev.)
+    if not settings.database_url.startswith("sqlite"):
+        db.query(models.Bay).filter(models.Bay.id.in_([b.id for b in bays])).with_for_update().all()
     _expire_stale_pending(db)
     clash = (
         db.query(models.Booking)
@@ -1171,15 +1193,32 @@ def create_razorpay_order(payload: schemas.RazorpayOrderCreate, db: Session = De
     import base64 as _b64
     import json as _json
     import time as _time
+    import urllib.error as _ue
     import urllib.request as _u
-    # Prefer the server-side booking total; fall back to the requested amount.
+
+    # Resolve the authoritative amount.
+    #  - kind="booking": ALWAYS use the server-side booking total. The client amount is
+    #    ignored, so a tampered client can't pay ₹1 for a ₹5000 booking.
+    #  - kind="guest_food": the guest pays for their own food cart, which isn't a booking
+    #    total, so the requested amount is used.
+    booking = None
     amount = payload.amount
-    if payload.booking_id:
+    if payload.kind == "booking":
+        if not payload.booking_id:
+            raise HTTPException(400, "booking_id is required for a booking payment")
         booking = db.query(models.Booking).filter(models.Booking.id == payload.booking_id).first()
-        if booking:
-            amount = booking.total_amount
+        if not booking:
+            raise HTTPException(404, "Booking not found")
+        if booking.payment_status == "paid":
+            raise HTTPException(409, "This booking is already paid")
+        amount = booking.total_amount
+
+    # Razorpay's minimum order is 100 paise (₹1). A 0/None amount → 400 from Razorpay.
+    amount_paise = int(round((amount or 0) * 100))
+    if amount_paise < 100:
+        raise HTTPException(400, f"Invalid payment amount (₹{amount or 0}). Minimum is ₹1.")
     body = _json.dumps({
-        "amount": int(round(amount * 100)),  # paise
+        "amount": amount_paise,
         "currency": "INR",
         "receipt": payload.booking_id or "strikin",
     }).encode()
@@ -1187,6 +1226,8 @@ def create_razorpay_order(payload: schemas.RazorpayOrderCreate, db: Session = De
 
     # Retry up to 3 times with a short backoff — Railway sometimes has transient
     # network hiccups calling out to Razorpay that resolve on the next attempt.
+    # But an HTTP error from Razorpay (401 bad keys, 400 bad request) will NEVER
+    # resolve on retry, so we fail fast and surface Razorpay's actual message.
     last_err = None
     for attempt in range(3):
         try:
@@ -1196,12 +1237,31 @@ def create_razorpay_order(payload: schemas.RazorpayOrderCreate, db: Session = De
                              headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"})
             with _u.urlopen(req, timeout=20, context=ctx) as r:
                 import json as __j
-                return __j.load(r)
+                order = __j.load(r)
+            # Bind this order to the booking so /verify can confirm the guest paid
+            # THIS order (correct amount) and not a cheaper one they made separately.
+            if booking is not None:
+                booking.razorpay_order_id = order.get("id", "")
+                db.commit()
+            return order
+        except _ue.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode("utf-8", "replace")
+            except Exception:
+                pass
+            if e.code in (401, 403):
+                raise HTTPException(502,
+                    "Razorpay rejected the API credentials (401). The RAZORPAY_KEY_SECRET on "
+                    f"the backend does not match key id '{settings.razorpay_key_id}'. "
+                    "Fix the Railway variable. " + detail)
+            # 400 etc. — bad request, retrying won't help.
+            raise HTTPException(502, f"Razorpay error {e.code}: {detail or e.reason}")
         except Exception as e:
             last_err = e
             if attempt < 2:
                 _time.sleep(1)  # wait 1s before retry
-    raise HTTPException(502, f"Razorpay error after 3 attempts: {last_err}")
+    raise HTTPException(502, f"Could not reach Razorpay after 3 attempts: {last_err}")
 
 
 # Completed payments, keyed by Razorpay order_id. The mobile app pays in the
@@ -1259,7 +1319,8 @@ def payments_done(payment_id: str = "", order_id: str = "", signature: str = "",
         # the app also verifies after polling).
         if booking_id and _razorpay_signature_ok(order_id, payment_id, signature):
             b = db.query(models.Booking).filter(models.Booking.id == booking_id).first()
-            if b:
+            # Only mark paid if this is the order we created for this booking.
+            if b and (not b.razorpay_order_id or b.razorpay_order_id == order_id):
                 b.payment_status = "paid"
                 b.status = "upcoming"
                 db.commit()
@@ -1271,8 +1332,17 @@ def payments_done(payment_id: str = "", order_id: str = "", signature: str = "",
 
 
 @app.get("/payments/status")
-def payments_status(order_id: str):
-    """The mobile app polls this after launching checkout in the browser."""
+def payments_status(order_id: str, db: Session = Depends(get_db)):
+    """The mobile app polls this after launching checkout in the browser.
+
+    Reads the booking's real payment status from the DATABASE — not an in-memory
+    dict — so the answer is correct even when the poll lands on a different server
+    replica than the one that handled /payments/done, and survives restarts."""
+    booking = (db.query(models.Booking)
+                 .filter(models.Booking.razorpay_order_id == order_id).first())
+    if booking and booking.payment_status == "paid":
+        return {"paid": True, "order_id": order_id, "booking_id": booking.id}
+    # Fast path / fallback for in-flight results not yet reflected on a booking.
     r = _PAYMENT_RESULTS.get(order_id)
     if r:
         return {"paid": True, **r}
@@ -1304,6 +1374,16 @@ def verify_razorpay_payment(payload: schemas.RazorpayVerify, db: Session = Depen
     booking = db.query(models.Booking).filter(models.Booking.id == payload.booking_id).first()
     if not booking:
         raise HTTPException(404, "Booking not found")
+    # The payment must be for the order WE created for THIS booking. This is what
+    # blocks "pay ₹1 on a cheap order, then claim an expensive booking is paid": the
+    # cheap order's id won't match the expensive booking's bound order id. (Bookings
+    # made before this safeguard have no bound id — fall back to signature-only.)
+    if booking.razorpay_order_id and payload.razorpay_order_id != booking.razorpay_order_id:
+        raise HTTPException(400, "Payment does not match this booking's order")
+    # Idempotent: a repeated verify (e.g. retry) shouldn't double-notify.
+    if booking.payment_status == "paid":
+        return {"verified": True, "booking_id": booking.id,
+                "qr_code": booking.qr_code, "pin": booking.pin, "status": booking.status}
     booking.payment_status = "paid"
     booking.status = "upcoming"
     db.add(models.Notification(

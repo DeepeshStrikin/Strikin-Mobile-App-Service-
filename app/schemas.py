@@ -204,6 +204,9 @@ class FoodIn(BaseModel):
 class RazorpayOrderCreate(BaseModel):
     amount: float
     booking_id: str = ""
+    # "booking" → amount is taken from the booking on the server (client amount ignored).
+    # "guest_food" → a guest paying for their own food cart; the client amount is used.
+    kind: str = "booking"
 
 
 class RazorpayVerify(BaseModel):

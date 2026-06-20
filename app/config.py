@@ -1,6 +1,7 @@
 """Application settings, loaded from environment (.env). No secrets in source."""
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -31,6 +32,13 @@ class Settings(BaseSettings):
     gmail_user: str = ""
     gmail_app_password: str = ""
     restoworks_api_key: str = ""
+
+    # Credentials pasted into Railway/.env often carry a trailing space or newline,
+    # which silently breaks Basic-auth and HMAC signatures (Razorpay → 401). Strip them.
+    @field_validator("razorpay_key_id", "razorpay_key_secret", mode="before")
+    @classmethod
+    def _strip_secret(cls, v):
+        return v.strip() if isinstance(v, str) else v
 
     @property
     def cors_origin_list(self) -> list[str]:

@@ -118,6 +118,10 @@ class Booking(Base):
     tax_amount: Mapped[float] = mapped_column(Float, default=0)
     payment_status: Mapped[str] = mapped_column(String, default="confirmed")
     status: Mapped[str] = mapped_column(String, default="upcoming")
+    # The Razorpay order created for THIS booking. Bound at order-creation so payment
+    # verification can confirm the guest paid the order we made (correct amount) and
+    # not a cheaper order they created separately.
+    razorpay_order_id: Mapped[str] = mapped_column(String, default="")
     qr_code: Mapped[str] = mapped_column(String, default="")
     pin: Mapped[str] = mapped_column(String, default="")
     loyalty_earned: Mapped[int] = mapped_column(Integer, default=0)
