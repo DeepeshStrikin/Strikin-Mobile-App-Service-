@@ -1170,6 +1170,7 @@ def create_razorpay_order(payload: schemas.RazorpayOrderCreate, db: Session = De
         raise HTTPException(400, "Razorpay not configured — add keys to backend/.env")
     import base64 as _b64
     import json as _json
+    import time as _time
     import urllib.request as _u
     # Prefer the server-side booking total; fall back to the requested amount.
     amount = payload.amount
@@ -1183,16 +1184,24 @@ def create_razorpay_order(payload: schemas.RazorpayOrderCreate, db: Session = De
         "receipt": payload.booking_id or "strikin",
     }).encode()
     auth = _b64.b64encode(f"{settings.razorpay_key_id}:{settings.razorpay_key_secret}".encode()).decode()
-    req = _u.Request("https://api.razorpay.com/v1/orders", data=body,
-                     headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"})
-    try:
-        import ssl as __ssl
-        ctx = __ssl.create_default_context()  # verify certs — payment traffic must be MITM-safe
-        with _u.urlopen(req, timeout=15, context=ctx) as r:
-            import json as __j
-            return __j.load(r)
-    except Exception as e:
-        raise HTTPException(502, f"Razorpay error: {e}")
+
+    # Retry up to 3 times with a short backoff — Railway sometimes has transient
+    # network hiccups calling out to Razorpay that resolve on the next attempt.
+    last_err = None
+    for attempt in range(3):
+        try:
+            import ssl as __ssl
+            ctx = __ssl.create_default_context()
+            req = _u.Request("https://api.razorpay.com/v1/orders", data=body,
+                             headers={"Authorization": f"Basic {auth}", "Content-Type": "application/json"})
+            with _u.urlopen(req, timeout=20, context=ctx) as r:
+                import json as __j
+                return __j.load(r)
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                _time.sleep(1)  # wait 1s before retry
+    raise HTTPException(502, f"Razorpay error after 3 attempts: {last_err}")
 
 
 # Completed payments, keyed by Razorpay order_id. The mobile app pays in the
